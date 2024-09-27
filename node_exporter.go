@@ -16,7 +16,9 @@ package main
 import (
 	"fmt"
 	"net/http"
-	_ "net/http/pprof"
+	"net/http/pprof"
+	"os"
+	"path"
 	"sort"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -28,7 +30,24 @@ import (
 )
 
 func init() {
+	http.DefaultServeMux = http.NewServeMux()
 	prometheus.MustRegister(version.NewCollector("node_exporter"))
+}
+
+func basicAuth(username, password string, handler func(http.ResponseWriter, *http.Request)) func(http.ResponseWriter, *http.Request) {
+	if username == "" && password == "" {
+		return handler
+	}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		user, pwd, ok := r.BasicAuth()
+		if !ok || user != username || pwd != password {
+			w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		handler(w, r)
+	}
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
@@ -72,6 +91,10 @@ func main() {
 	var (
 		listenAddress = kingpin.Flag("web.listen-address", "Address on which to expose metrics and web interface.").Default(":9100").String()
 		metricsPath   = kingpin.Flag("web.telemetry-path", "Path under which to expose metrics.").Default("/metrics").String()
+		pprofEnabled  = kingpin.Flag("debug.pprof", "If true enables debug pprof endpoints on /debug/pprof.").Default("false").Bool()
+		pprofPath     = kingpin.Flag("debug.path", "The URL under which debug pprof endpoints are available.").Default("/debug/pprof/").String()
+		username      = os.Getenv("USERNAME")
+		password      = os.Getenv("PASSWORD")
 	)
 
 	log.AddFlags(kingpin.CommandLine)
@@ -97,7 +120,15 @@ func main() {
 		log.Infof(" - %s", n)
 	}
 
-	http.HandleFunc(*metricsPath, handler)
+	if *pprofEnabled {
+		http.HandleFunc(*pprofPath, pprof.Index)
+		http.HandleFunc(path.Join(*pprofPath, "cmdline"), pprof.Cmdline)
+		http.HandleFunc(path.Join(*pprofPath, "profile"), pprof.Profile)
+		http.HandleFunc(path.Join(*pprofPath, "symbol"), pprof.Symbol)
+		http.HandleFunc(path.Join(*pprofPath, "trace"), pprof.Trace)
+	}
+
+	http.HandleFunc(*metricsPath, basicAuth(username, password, handler))
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`<html>
 			<head><title>Node Exporter</title></head>
